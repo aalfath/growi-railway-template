@@ -8,4 +8,4 @@ Breaking changes are listed first in each entry.
 - Self-registration is set to Closed on the first boot, after the admin is created and before the public port opens.
 - Attachments are stored in MongoDB (GridFS); GROWI's telemetry is off.
 - Deploy on Railway button for the template code `growi-1`.
-- MongoDB 8.0.38 (`mongo:8.0.38@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01`) as a single-node replica set with a generated password, on a Railway volume. Attachments are stored in MongoDB (GridFS).
+- MongoDB 8.0.38 (`mongo:8.0.38@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01`) as a single-node replica set with a generated password, on a Railway volume.
