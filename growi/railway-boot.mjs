@@ -1,15 +1,12 @@
-// Start script for GROWI on Railway.
+// First-boot setup for GROWI on Railway, run once by start.sh before GROWI starts.
 //
-// 1. Checks the generated secrets are set, and fills in safe defaults.
-// 2. Waits for MongoDB to accept writes (single-node replica set).
-// 3. Takes a boot lock in MongoDB, so overlapping deploys never migrate or install twice.
-// 4. On the first boot only: runs GROWI on a private port (Railway routes nothing to it)
+// 1. Waits for MongoDB to accept writes (single-node replica set).
+// 2. Takes a boot lock in MongoDB, so overlapping deploys never install twice.
+// 3. On the first boot only: runs GROWI on a private port (Railway routes nothing to it)
 //    so its auto-install creates the admin from AUTO_INSTALL_ADMIN_*, checks the admin
-//    exists, stops it and sets self-registration to "Closed". If that fails, the
-//    container exits non-zero and the public port never opens on an uninstalled wiki.
-// 5. Runs the upstream entrypoint (migrations, privilege drop, heap sized from the
-//    cgroup) on $PORT. Any unexpected exit, even with code 0, exits non-zero so
-//    Railway's ON_FAILURE policy restarts it.
+//    exists, stops it and sets self-registration to "Closed". If that fails, it exits
+//    non-zero and the public port never opens on an uninstalled wiki.
+// Exits 0 when GROWI is set up.
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
@@ -22,44 +19,6 @@ const fail = (msg) => {
 };
 
 const env = process.env;
-const def = (k, v) => {
-  if (env[k] == null || env[k] === '') env[k] = v;
-};
-
-for (const k of ['MONGO_URI', 'PASSWORD_SEED', 'SECRET_TOKEN', 'AUTO_INSTALL_ADMIN_PASSWORD']) {
-  if (!env[k]) fail(`${k} is empty: refusing to start (set it on the GROWI service)`);
-}
-if (env.AUTO_INSTALL_ADMIN_PASSWORD.length < 8) fail('AUTO_INSTALL_ADMIN_PASSWORD must be at least 8 characters');
-
-def('PORT', '3000');
-def('AUTO_INSTALL_ADMIN_USERNAME', 'admin');
-def('AUTO_INSTALL_ADMIN_NAME', env.AUTO_INSTALL_ADMIN_USERNAME);
-def('AUTO_INSTALL_GLOBAL_LANG', 'en_US');
-// Attachments are stored in MongoDB (GridFS), so the GROWI service itself keeps no state
-// and the whole stack needs only MongoDB's volume.
-def('FILE_UPLOAD', 'mongodb');
-def('DEPLOYMENT_TYPE', 'others');
-// Upstream sends anonymised telemetry to telemetry.growi.org by default; off here.
-def('OPENTELEMETRY_ENABLED', 'false');
-// Railway's proxy reaches the service from these ranges; trust them for X-Forwarded-*.
-if (!env.TRUST_PROXY_BOOL && !env.TRUST_PROXY_HOPS) def('TRUST_PROXY_CSV', 'loopback,100.64.0.0/10,152.233.0.0/16');
-// Site URL from Railway's public domain, ignored when empty or invalid.
-if (!env.APP_SITE_URL) {
-  const d = (env.RAILWAY_PUBLIC_DOMAIN || '').trim();
-  if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d)) env.APP_SITE_URL = `https://${d}`;
-}
-if (env.APP_SITE_URL && !/^https?:\/\/[^/\s]+/.test(env.APP_SITE_URL)) {
-  log(`ignoring invalid APP_SITE_URL "${env.APP_SITE_URL}"`);
-  delete env.APP_SITE_URL;
-}
-// libuv threads from the service's CPUs, not the host's.
-try {
-  const [quota, period] = fs.readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim().split(/\s+/);
-  const cpus = quota === 'max' ? os.availableParallelism() : Math.ceil(Number(quota) / Number(period));
-  def('UV_THREADPOOL_SIZE', String(Math.min(4, Math.max(2, cpus || 2))));
-} catch {
-  def('UV_THREADPOOL_SIZE', '4');
-}
 
 const require = createRequire('/opt/growi/apps/app/package.json');
 const { MongoClient } = require('mongodb');
@@ -124,7 +83,7 @@ async function isSetUp(db) {
 const hasActiveAdmin = async (db) => (await db.collection('users').countDocuments({ admin: true, status: 2 })) > 0;
 
 function runUpstream(port) {
-  return spawn(process.execPath, ['/docker-entrypoint.ts'], {
+  return spawn(process.execPath, ['--max-old-space-size=48', '/docker-entrypoint.ts'], {
     stdio: 'inherit',
     env: { ...env, PORT: String(port) },
   });
@@ -195,22 +154,6 @@ const db = client.db(); // database from MONGO_URI
 await takeLock(db);
 if (!(await isSetUp(db))) await firstBoot(db);
 
-log(`starting GROWI on port ${env.PORT}`);
-const app = runUpstream(env.PORT);
-let stopping = false;
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => {
-    stopping = true;
-    app.kill(sig);
-  });
-}
-app.on('exit', (code, signal) => {
-  if (stopping) process.exit(0);
-  console.error(`[railway] GROWI exited (code ${code}, signal ${signal}); exiting non-zero so Railway restarts it`);
-  process.exit(code ? code : 1);
-});
-
-// Keep the boot lock until GROWI answers on the public port (migrations done), then release it.
-if (await waitHttp(env.PORT, app, 15 * 60 * 1000)) log('GROWI is up');
 await releaseLock(db);
 await client.close().catch(() => {});
+process.exit(0);
